@@ -381,8 +381,11 @@ pub fn spawn(pid: u32, agent_id: Option<String>) -> AbortOnDrop {
             };
             let now = chrono::Utc::now().timestamp_millis();
             if let Some(u) = tracker.observe(&sample, now) {
+                // Awaited, so writes for this pid never overlap: the shared temp
+                // name can't be clobbered and the newest sample always lands last.
                 let id = agent_id.clone();
-                tokio::task::spawn_blocking(move || write_workdir(pid, id.as_deref(), &u));
+                let _ = tokio::task::spawn_blocking(move || write_workdir(pid, id.as_deref(), &u))
+                    .await;
             }
         }
     });
