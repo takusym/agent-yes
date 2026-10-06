@@ -99,6 +99,7 @@ import {
 } from "./remoteHealth.ts";
 import { isWebrtcSpec } from "./webrtcLink.ts";
 import { withIpcLock } from "./ipcLock.ts";
+import { clearSelfReport, isWithin, resolveWorkDirs, writeSelfReport } from "./workDir.ts";
 
 // ---------------------------------------------------------------------------
 // notes store  (~/.agent-yes/notes.jsonl)
@@ -642,6 +643,7 @@ const SUBCOMMANDS = new Set([
   "exit",
   "restart",
   "note",
+  "cwd",
   "todo",
   "ask",
   "answer",
@@ -1054,6 +1056,8 @@ export async function runSubcommand(argv: string[]): Promise<number | null> {
         return await cmdRestart(rest);
       case "note":
         return await cmdNote(rest);
+      case "cwd":
+        return await cmdCwd(rest);
       case "ask":
       case "answer": {
         // `ay ask` needs `ay send`'s delivery path and this file's agent
@@ -1313,6 +1317,8 @@ export async function cmdHelp(managerCommands = true): Promise<number> {
       `                                        transcripts, incl. exited sessions);\n` +
       `                                        this cwd unless --all\n` +
       `  ay send <keyword> <msg>             send a message (keyword '.' = agent in this cwd)\n` +
+      `  ay cwd [dir] [--clear]              report where this agent works (default: $PWD) so\n` +
+      `                                        ay ls / keywords follow it, not the spawn dir\n` +
       `  ay msgs [keyword] [--in|--out]      inter-agent message log (sent + received)\n` +
       `  ay ch mk|join|send|read|tail <topic>  local-first E2E channels: AI ↔ humans on a topic (ay ch help)\n` +
       `  ay term embed <pid>                 <script> to embed a live read-only agent terminal in a page (ay term help)\n` +
@@ -1394,10 +1400,16 @@ export function matchKeyword(record: GlobalPidRecord, keyword: string): boolean 
   // fragment. Repurposed from the (near-useless) substring behavior — a lone `.`
   // was in almost every path, so it never selected anything meaningful.
   if (kw === "." || kw === "./") {
-    return path.resolve(record.cwd) === path.resolve(process.cwd());
+    const here = path.resolve(process.cwd());
+    return (
+      path.resolve(record.cwd) === here ||
+      (!!record.workdir && path.resolve(record.workdir) === here)
+    );
   }
-  // 2. cwd contains keyword
+  // 2. cwd (spawn dir or effective work dir) contains keyword
   if (record.cwd.toLowerCase().includes(kw)) return true;
+  if (record.workdir && record.workdir.toLowerCase().includes(kw)) return true;
+
   // 3. cli exact (lowercase)
   if (record.cli.toLowerCase() === kw) return true;
   // 4. prompt substring
@@ -1426,14 +1438,54 @@ export async function listRecords(
   if (opts.active) {
     records = records.filter((r) => isPidAlive(r.pid));
   }
+  records = await withWorkDirs(records);
   if (opts.cwdScope) {
     const scope = opts.cwdScope;
-    records = records.filter((r) => r.cwd === scope || r.cwd.startsWith(scope + path.sep));
+    records = records.filter(
+      (r) => isWithin(r.cwd, scope) || (!!r.workdir && isWithin(r.workdir, scope)),
+    );
   }
+
   if (keyword) records = records.filter((r) => matchKeyword(r, keyword));
   // newest first
   records.sort((a, b) => b.started_at - a.started_at);
   return records;
+}
+
+// git toplevel per dir, shared across one process's listRecords calls (serve
+// polls listRecords; a repo's root doesn't move under a running agent).
+const workDirRootCache = new Map<string, Promise<string | null>>();
+function gitRootCached(dir: string): Promise<string | null> {
+  let p = workDirRootCache.get(dir);
+  if (!p) {
+    p = runGitCli(["rev-parse", "--show-toplevel"], dir).then((o) => o?.trim() || null);
+    workDirRootCache.set(dir, p);
+  }
+  return p;
+}
+
+/**
+ * Stamp each live record with its effective work dir (ts/workDir.ts). Exited
+ * agents keep their spawn cwd: their transcript is history, not a location.
+ */
+async function withWorkDirs(records: GlobalPidRecord[]): Promise<GlobalPidRecord[]> {
+  const live = records.filter((r) => r.status !== "exited");
+  const dirs = await resolveWorkDirs(live, gitRootCached).catch(() => new Map());
+  return records.map((r) => {
+    const w = dirs.get(r.pid);
+    return w ? { ...r, ...w } : { ...r, workdir: r.cwd, workdir_source: "spawn", workdir_at: null };
+  });
+}
+
+/**
+ * The CWD column: the effective work dir, with a leading `↪` when it is not the
+ * spawn dir (self-reported or observed) so a reader knows the registry's `cwd`
+ * says otherwise. `ay ls --json` carries both (`cwd` + `workdir`).
+ */
+export function cwdLabel(r: { cwd: string; workdir?: string; workdir_source?: string }): string {
+  if (r.workdir && r.workdir_source && r.workdir_source !== "spawn")
+    return `↪ ${shortenPath(r.workdir)}`;
+  return shortenPath(r.cwd);
 }
 
 export function isPidAlive(pid: number): boolean {
@@ -2215,7 +2267,7 @@ async function runAllRemotesLs(opts: {
           ? await Promise.all([
               r.log_file ? extractTaskCounts(r.log_file) : Promise.resolve(null),
               r.log_file ? extractBadges(r.log_file) : Promise.resolve([]),
-              gitStatusOnce(r.cwd, gitRootCache, gitInfoCache),
+              gitStatusOnce(r.workdir ?? r.cwd, gitRootCache, gitInfoCache),
               isUserTyping(r.pid),
             ])
           : [null, [], null, false];
@@ -2284,7 +2336,7 @@ async function runAllRemotesLs(opts: {
   const cliW = Math.max(3, ...rows.map((r) => String(r.rec.cli).length));
   const statusW = Math.max(6, ...rows.map((r) => String(r.rec.status).length));
   const ageW = Math.max(3, ...rows.map((r) => ageOf(r.rec).length));
-  const cwdW = Math.max(3, ...rows.map((r) => shortenPath(String(r.rec.cwd)).length));
+  const cwdW = Math.max(3, ...rows.map((r) => cwdLabel(r.rec).length));
   const promptBudget = Math.max(
     20,
     termWidth - hostW - pidW - cliW - statusW - ageW - cwdW - 6 * 2 - 1,
@@ -2323,7 +2375,7 @@ async function runAllRemotesLs(opts: {
         String(rec.cli).padEnd(cliW),
         String(rec.status).padEnd(statusW),
         ageOf(rec).padEnd(ageW),
-        shortenPath(String(rec.cwd)).padEnd(cwdW),
+        cwdLabel(rec).padEnd(cwdW),
         label,
       ].join("  ") + "\n",
     );
@@ -2851,7 +2903,7 @@ async function cmdLs(rest: string[]): Promise<number> {
   );
   const ageOf = (r: GlobalPidRecord) => humanizeAge(now - (lastActive.get(r.pid) ?? r.started_at));
 
-  const rawCwds = records.map((r) => shortenPath(r.cwd));
+  const rawCwds = records.map((r) => cwdLabel(r));
   const widths = {
     pid: Math.max(3, ...records.map((r) => String(r.pid).length)),
     cli: Math.max(3, ...records.map((r) => r.cli.length)),
@@ -2887,7 +2939,7 @@ async function cmdLs(rest: string[]): Promise<number> {
         ? await Promise.all([
             r.log_file ? extractTaskCounts(r.log_file) : Promise.resolve(null),
             r.log_file ? extractBadges(r.log_file) : Promise.resolve([]),
-            gitStatusOnce(r.cwd, gitRootCache, gitInfoCache),
+            gitStatusOnce(r.workdir ?? r.cwd, gitRootCache, gitInfoCache),
             isUserTyping(r.pid),
           ])
         : [null, [], null, false];
@@ -2923,7 +2975,7 @@ async function cmdLs(rest: string[]): Promise<number> {
         cli: r.cli,
         status: displayStatus,
         age: ageOf(r),
-        cwd: shortenPath(r.cwd),
+        cwd: cwdLabel(r),
         label,
         hasNote,
         _alive: displayStatus !== "stopped",
@@ -6519,6 +6571,70 @@ async function cmdNote(rest: string[]): Promise<number> {
 }
 
 // ---------------------------------------------------------------------------
+// ay cwd
+// ---------------------------------------------------------------------------
+
+/**
+ * Self-report the dir this agent works in. A lane spawned in one dir that
+ * works in another (`cd <worktree> && …` per call) runs `cd <worktree> && ay cwd`
+ * once; `ay ls` then shows that dir (and its git badges) and keywords match it.
+ * See ts/workDir.ts for how it ranks against observed signals.
+ */
+async function cmdCwd(rest: string[]): Promise<number> {
+  const y = yargs(rest)
+    .usage(
+      "Usage: ay cwd [dir] [--clear] [--agent <keyword>]\n\n" +
+        "Report where this agent works (default: the current dir), so `ay ls` shows it\n" +
+        "instead of the spawn dir and `ay send/tail/status <keyword>` match it.",
+    )
+    .option("clear", {
+      type: "boolean",
+      default: false,
+      description: "Drop the self-report",
+    })
+    .option("agent", {
+      type: "string",
+      description: "Set it for another agent (pid / id / keyword) instead of yourself",
+    })
+    .option("help", { alias: "h", type: "boolean", default: false })
+    .example("cd ~/repo/tree/feat-x && ay cwd", "this agent now lists under tree/feat-x")
+    .help(false)
+    .version(false)
+    .exitProcess(false);
+  const argv = await y.parseAsync();
+  if (argv.help) {
+    process.stdout.write((await y.getHelp()) + "\n");
+    return 0;
+  }
+  const record =
+    typeof argv.agent === "string"
+      ? await resolveOne(argv.agent, {
+          all: false,
+          active: false,
+          json: false,
+          latest: false,
+          cwdScope: null,
+        })
+      : await resolveSender();
+  if (!record) {
+    throw new Error(
+      "not running inside an ay-launched agent (no AGENT_YES_PID) — pass --agent <keyword>",
+    );
+  }
+  if (argv.clear) {
+    await clearSelfReport(record.pid);
+    process.stdout.write(`cleared work dir for pid ${record.pid}\n`);
+    return 0;
+  }
+  const dir = path.resolve(argv._[0] !== undefined ? String(argv._[0]) : process.cwd());
+  const st = await stat(dir).catch(() => null);
+  if (!st?.isDirectory()) throw new Error(`not a directory: ${dir}`);
+  await writeSelfReport(record.pid, dir);
+  process.stdout.write(`work dir for pid ${record.pid}: ${shortenPath(dir)}\n`);
+  return 0;
+}
+
+// ---------------------------------------------------------------------------
 // ay status
 // ---------------------------------------------------------------------------
 
@@ -6526,6 +6642,9 @@ export interface StatusSnapshot {
   pid: number;
   cli: string;
   cwd: string;
+  /** Effective work dir (see ts/workDir.ts); equals `cwd` when source is spawn. */
+  workdir: string;
+  workdir_source: "self" | "observed" | "spawn";
   // needs_input: alive but blocked on an interactive menu (distinct from idle =
   // alive+quiet/done, and stopped = exited). stuck: alive + busy marker on screen
   // but long-silent (wedged mid-stream). unreachable: alive but its stdin FIFO
@@ -6601,6 +6720,8 @@ export async function snapshotStatus(record: GlobalPidRecord): Promise<StatusSna
     pid: record.pid,
     cli: record.cli,
     cwd: record.cwd,
+    workdir: record.workdir ?? record.cwd,
+    workdir_source: record.workdir_source ?? "spawn",
     state,
     activity,
     question,
