@@ -49,19 +49,34 @@ describe("resolveWorkDir", () => {
     ).toMatchObject({ workdir: "/repo/alpha", workdir_source: "spawn" });
   });
 
+  it("ignores a sample when either side lacks an agent_id", async () => {
+    const wt = path.join(root, "feat-x");
+    mkdirSync(wt);
+    sample(1111, wt, 42);
+    expect(
+      await resolveWorkDir({ pid: 1111, agent_id: "abc123", cwd: "/repo/alpha" }),
+    ).toMatchObject({ workdir_source: "spawn" });
+    sample(1111, wt, 42, "abc123");
+    expect(await resolveWorkDir({ pid: 1111, cwd: "/repo/alpha" })).toMatchObject({
+      workdir_source: "spawn",
+    });
+  });
+
   it("keeps the more precise spawn dir when the sampled repo contains it", async () => {
     const spawn = path.join(root, "lib", "x");
     mkdirSync(spawn, { recursive: true });
-    sample(1111, root, 1);
-    expect(await resolveWorkDir({ pid: 1111, cwd: spawn })).toMatchObject({
+    sample(1111, root, 1, "abc123");
+    expect(await resolveWorkDir({ pid: 1111, agent_id: "abc123", cwd: spawn })).toMatchObject({
       workdir: spawn,
       workdir_source: "spawn",
     });
   });
 
   it("ignores a sampled dir that no longer exists (worktree removed)", async () => {
-    sample(1111, path.join(root, "gone"), 1);
-    expect(await resolveWorkDir({ pid: 1111, cwd: "/repo/alpha" })).toMatchObject({
+    sample(1111, path.join(root, "gone"), 1, "abc123");
+    expect(
+      await resolveWorkDir({ pid: 1111, agent_id: "abc123", cwd: "/repo/alpha" }),
+    ).toMatchObject({
       workdir: "/repo/alpha",
       workdir_source: "spawn",
     });

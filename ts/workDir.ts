@@ -33,8 +33,8 @@ export function workdirSamplePath(pid: number): string {
 }
 
 /**
- * The wrapper's latest sample for this agent, or null. A sample tagged with a
- * different `agent_id` belongs to an earlier agent that had the same pid.
+ * The wrapper's latest sample for this agent, or null. A sample whose
+ * `agent_id` doesn't match belongs to an earlier agent that had the same pid.
  */
 export async function readWorkdirSample(r: {
   pid: number;
@@ -43,7 +43,9 @@ export async function readWorkdirSample(r: {
   try {
     const j = JSON.parse(await readFile(workdirSamplePath(r.pid), "utf-8"));
     if (typeof j?.workdir !== "string" || typeof j?.at !== "number") return null;
-    if (r.agent_id && j.agent_id && j.agent_id !== r.agent_id) return null;
+    // Both sides must carry the id and agree: a sample without one (or a record
+    // without one) can't be told apart from a crashed predecessor's leftover.
+    if (!r.agent_id || j.agent_id !== r.agent_id) return null;
     return { workdir: j.workdir, at: j.at };
   } catch {
     return null;

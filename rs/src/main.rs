@@ -480,6 +480,8 @@ async fn run_agent(mut args: CliArgs, cwd: &str) -> Result<i32> {
         // stops when this iteration's loop ends.
         let my_pid = std::process::id();
         let agent_id = pid_store.find_agent(my_pid).and_then(|r| r.agent_id);
+        // A crashed predecessor with our pid may have left a sample behind.
+        workdir_sampler::remove_workdir(my_pid);
         let _workdir_sampler = workdir_sampler::spawn(my_pid, agent_id);
 
         // Run the main loop
