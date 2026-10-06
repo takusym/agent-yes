@@ -128,16 +128,22 @@ impl Tracker {
     pub fn observe(&mut self, sample: &[(u32, PathBuf)], now: i64) -> Option<Update> {
         let live: HashSet<u32> = sample.iter().map(|(p, _)| *p).collect();
         self.last_cwd.retain(|p, _| live.contains(p));
+        // Roots some live process sits in right now: they confirm a winner's
+        // timestamp even when no new vote arrives (a lane parked in one shell).
+        let mut present: HashSet<PathBuf> = HashSet::new();
         for (pid, cwd) in sample {
-            if self.last_cwd.get(pid) == Some(cwd) {
-                continue;
-            }
-            self.last_cwd.insert(*pid, cwd.clone());
             let root = self
                 .root_cache
                 .entry(cwd.clone())
                 .or_insert_with(|| repo_root(cwd))
                 .clone();
+            if let Some(r) = &root {
+                present.insert(r.clone());
+            }
+            if self.last_cwd.get(pid) == Some(cwd) {
+                continue;
+            }
+            self.last_cwd.insert(*pid, cwd.clone());
             if let Some(root) = root {
                 self.votes.push_back((root, now));
                 while self.votes.len() > WINDOW {
@@ -150,7 +156,12 @@ impl Tracker {
         if self.root_cache.len() > 4096 {
             self.root_cache.clear();
         }
-        let (winner, last_at) = self.winner()?;
+        let (winner, last_vote_at) = self.winner()?;
+        let last_at = if present.contains(&winner) {
+            now
+        } else {
+            last_vote_at
+        };
         let due = match &self.written {
             Some((w, at)) => *w != winner || last_at - at >= REFRESH_MS,
             None => true,
@@ -521,6 +532,22 @@ mod tests {
         vote(&mut tr, &b);
         vote(&mut tr, &b);
         assert_eq!(tr.written.as_ref().unwrap().0, b);
+    }
+
+    #[test]
+    fn a_lane_parked_in_one_shell_still_refreshes_its_timestamp() {
+        let t = tempfile::tempdir().unwrap();
+        let a = repo(t.path(), "a");
+        let mut tr = Tracker::new();
+        assert!(tr.observe(&[(1, a.clone())], 0).is_some());
+        // same pid, same cwd: no new vote, but it is still there a minute later
+        assert_eq!(tr.observe(&[(1, a.clone())], 30_000), None);
+        assert_eq!(
+            tr.observe(&[(1, a.clone())], 61_000).map(|u| u.at),
+            Some(61_000)
+        );
+        // gone: the timestamp stays at the last confirmation
+        assert_eq!(tr.observe(&[], 200_000), None);
     }
 
     #[test]
