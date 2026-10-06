@@ -284,8 +284,11 @@ pub struct AgentContext {
     typing_screen_hash: Option<u64>,
     typing_resends: u8,
 
-    // Enter key scheduling
+    // Enter key scheduling. `pending_enter_pattern` is the index (in
+    // cli_config.enter) of the pattern that scheduled it — re-checked before
+    // every Enter of the cycle.
     pending_enter: bool,
+    pending_enter_pattern: Option<usize>,
     pending_enter_detected_at: Option<Instant>,
     enter_sent_at: Option<Instant>,
     enter_retry_count: u8,
@@ -418,6 +421,7 @@ impl AgentContext {
             typing_screen_hash: None,
             typing_resends: 0,
             pending_enter: false,
+            pending_enter_pattern: None,
             pending_enter_detected_at: None,
             enter_sent_at: None,
             enter_retry_count: 0,
@@ -1359,10 +1363,11 @@ impl AgentContext {
                     // prompts can be re-handled after intervening output.
                     if self.last_action_screen_hash != Some(buffer_hash) {
                         self.last_action_screen_hash = None;
-                        for pattern in &self.cli_config.enter {
+                        for (idx, pattern) in self.cli_config.enter.iter().enumerate() {
                             if pattern.is_match(&buffer) {
                                 debug!("Idle scan: enter pattern matched after {}ms idle", idle_ms);
                                 self.pending_enter = true;
+                                self.pending_enter_pattern = Some(idx);
                                 self.pending_enter_detected_at = Some(Instant::now());
                                 self.enter_sent_at = None;
                                 self.enter_retry_count = 0;
@@ -1462,22 +1467,26 @@ impl AgentContext {
     /// leaving "❯ Yes, I trust this folder" on screen, unchecked, for a minute.
     fn end_pending_enter(&mut self) {
         self.pending_enter = false;
+        self.pending_enter_pattern = None;
         self.pending_enter_detected_at = None;
         self.enter_sent_at = None;
         self.enter_retry_count = 0;
         self.last_checked_screen_hash = None;
     }
 
-    /// Whether the current screen still shows a prompt an `enter` pattern is
-    /// for (and nothing in `enterExclude`).
+    /// Whether the current screen still shows the prompt that scheduled the
+    /// pending Enter (the same `enter` pattern, and nothing in `enterExclude`).
     fn enter_target_on_screen(&self) -> bool {
         let screen = self.vterm.contents();
+        let target = self
+            .pending_enter_pattern
+            .and_then(|i| self.cli_config.enter.get(i));
         !self
             .cli_config
             .enter_exclude
             .iter()
             .any(|p| p.is_match(&screen))
-            && self.cli_config.enter.iter().any(|p| p.is_match(&screen))
+            && target.is_some_and(|p| p.is_match(&screen))
     }
 
     /// Actually send the Enter key
@@ -1767,7 +1776,7 @@ impl AgentContext {
             .enter_exclude
             .iter()
             .any(|pattern| pattern.is_match(&buffer));
-        for pattern in &self.cli_config.enter {
+        for (idx, pattern) in self.cli_config.enter.iter().enumerate() {
             if pattern.is_match(&buffer) {
                 if enter_excluded {
                     debug!("Enter pattern matched but excluded");
@@ -1776,6 +1785,7 @@ impl AgentContext {
                 if !self.pending_enter {
                     debug!("Enter pattern matched, scheduling Enter after idle");
                     self.pending_enter = true;
+                    self.pending_enter_pattern = Some(idx);
                     self.pending_enter_detected_at = Some(Instant::now());
                     self.enter_sent_at = None;
                     self.enter_retry_count = 0;
