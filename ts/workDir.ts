@@ -40,27 +40,44 @@ export interface TimedPath {
 // ---------------------------------------------------------------------------
 // self-report store: <agentYesHome>/workdir/<pid>.json — one file per agent so
 // concurrent `ay cwd` calls from different lanes never race on a shared file.
+// The report is bound to the agent's registration time (`started_at`), so a
+// later agent that reuses the pid never inherits a dead agent's work dir.
 // ---------------------------------------------------------------------------
+
+/** The registry identity a self-report belongs to. */
+export interface AgentKey {
+  pid: number;
+  started_at: number;
+}
 
 function selfReportPath(pid: number): string {
   return path.join(agentYesHome(), "workdir", `${pid}.json`);
 }
 
-export async function readSelfReport(pid: number): Promise<TimedPath | null> {
+export async function readSelfReport(agent: AgentKey): Promise<TimedPath | null> {
   try {
-    const j = JSON.parse(await readFile(selfReportPath(pid), "utf-8"));
-    if (typeof j?.path === "string" && typeof j?.at === "number") return { path: j.path, at: j.at };
+    const j = JSON.parse(await readFile(selfReportPath(agent.pid), "utf-8"));
+    if (
+      typeof j?.path === "string" &&
+      typeof j?.at === "number" &&
+      j?.started_at === agent.started_at
+    )
+      return { path: j.path, at: j.at };
   } catch {
     /* none */
   }
   return null;
 }
 
-export async function writeSelfReport(pid: number, dir: string, now = Date.now()): Promise<void> {
-  const p = selfReportPath(pid);
+export async function writeSelfReport(
+  agent: AgentKey,
+  dir: string,
+  now = Date.now(),
+): Promise<void> {
+  const p = selfReportPath(agent.pid);
   await mkdir(path.dirname(p), { recursive: true });
   const tmp = `${p}.${process.pid}.tmp`;
-  await writeFile(tmp, JSON.stringify({ path: dir, at: now }) + "\n");
+  await writeFile(tmp, JSON.stringify({ path: dir, at: now, started_at: agent.started_at }) + "\n");
   await rename(tmp, p);
 }
 
@@ -295,8 +312,7 @@ async function readTailLines(file: string): Promise<string[]> {
 /** git toplevel of `dir`, or null when it isn't in a repo / doesn't exist. */
 export type GitRootFn = (dir: string) => Promise<string | null>;
 
-export interface WorkDirRecord {
-  pid: number;
+export interface WorkDirRecord extends AgentKey {
   cli: string;
   cwd: string;
 }
@@ -324,7 +340,7 @@ export async function resolveWorkDirs(
   await Promise.all(
     records.map(async (r) => {
       try {
-        const selfRaw = await readSelfReport(r.pid);
+        const selfRaw = await readSelfReport(r);
         const self =
           selfRaw &&
           (await stat(selfRaw.path).then(
