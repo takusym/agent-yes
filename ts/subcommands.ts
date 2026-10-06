@@ -6630,7 +6630,7 @@ async function cmdCwd(rest: string[]): Promise<number> {
   const dir = path.resolve(argv._[0] !== undefined ? String(argv._[0]) : process.cwd());
   const st = await stat(dir).catch(() => null);
   if (!st?.isDirectory()) throw new Error(`not a directory: ${dir}`);
-  await writeSelfReport(record.pid, dir);
+  await writeSelfReport(record, dir);
   process.stdout.write(`work dir for pid ${record.pid}: ${shortenPath(dir)}\n`);
   return 0;
 }

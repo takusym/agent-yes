@@ -205,11 +205,14 @@ describe("resolveWorkDirs (I/O)", () => {
   };
 
   it("self-report round-trips and clears", async () => {
-    expect(await readSelfReport(1111)).toBeNull();
-    await writeSelfReport(1111, "/repo/alpha", 42);
-    expect(await readSelfReport(1111)).toEqual({ path: "/repo/alpha", at: 42 });
+    const agent = { pid: 1111, started_at: 7 };
+    expect(await readSelfReport(agent)).toBeNull();
+    await writeSelfReport(agent, "/repo/alpha", 42);
+    expect(await readSelfReport(agent)).toEqual({ path: "/repo/alpha", at: 42 });
+    // a later agent that reuses the pid doesn't inherit the report
+    expect(await readSelfReport({ pid: 1111, started_at: 8 })).toBeNull();
     await clearSelfReport(1111);
-    expect(await readSelfReport(1111)).toBeNull();
+    expect(await readSelfReport(agent)).toBeNull();
   });
 
   it("follows the claude transcript of the agent's process tree to the worked-in repo", async () => {
@@ -237,7 +240,7 @@ describe("resolveWorkDirs (I/O)", () => {
       ].join("\n") + "\n",
     );
 
-    const rec = { pid: process.pid, cli: "claude", cwd: spawn };
+    const rec = { pid: process.pid, started_at: 1, cli: "claude", cwd: spawn };
     const got = (await resolveWorkDirs([rec], gitRoot)).get(process.pid)!;
     expect(got.workdir).toBe(wt);
     expect(got.workdir_source).toBe("observed");
@@ -245,15 +248,18 @@ describe("resolveWorkDirs (I/O)", () => {
     // a self-report newer than the transcript wins
     const other = path.join(root, "other");
     mkdirSync(other);
-    await writeSelfReport(process.pid, other, Date.now() + 60_000);
+    await writeSelfReport(rec, other, Date.now() + 60_000);
     const got2 = (await resolveWorkDirs([rec], gitRoot)).get(process.pid)!;
     expect(got2).toMatchObject({ workdir: other, workdir_source: "self" });
   });
 
   it("ignores a self-report whose dir is gone, and non-claude agents fall back to spawn", async () => {
-    await writeSelfReport(2222, path.join(root, "deleted"));
+    await writeSelfReport({ pid: 2222, started_at: 1 }, path.join(root, "deleted"));
     const got = (
-      await resolveWorkDirs([{ pid: 2222, cli: "codex", cwd: "/repo/alpha" }], gitRoot)
+      await resolveWorkDirs(
+        [{ pid: 2222, started_at: 1, cli: "codex", cwd: "/repo/alpha" }],
+        gitRoot,
+      )
     ).get(2222)!;
     expect(got).toEqual({
       workdir: "/repo/alpha",
