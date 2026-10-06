@@ -72,11 +72,12 @@ export interface GlobalPidRecord {
   // "what is this agent doing" without reading its screen. Mirrors Rust's
   // `title`.
   title?: string | null;
-  // Derived at read time by listRecords (see ts/workDir.ts), never persisted:
-  // where the agent actually works when that differs from its spawn `cwd`
-  // (self-reported via `ay cwd`, or observed from its tool calls).
+  // Derived at read time by listRecords (ts/workDir.ts), never persisted: the
+  // repo this agent's shells actually run in, sampled from the kernel by the
+  // Rust wrapper — differs from `cwd` when a lane spawned in one dir works in
+  // another.
   workdir?: string;
-  workdir_source?: "self" | "observed" | "spawn";
+  workdir_source?: "observed" | "spawn";
   workdir_at?: number | null;
 }
 

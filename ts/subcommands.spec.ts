@@ -546,7 +546,7 @@ describe("subcommands.matchKeyword", () => {
     const r = {
       ...baseRecord,
       workdir: "/repo/alpha/tree/feat-x",
-      workdir_source: "self" as const,
+      workdir_source: "observed" as const,
     };
     expect(matchKeyword(r, "feat-x")).toBe(true);
     expect(matchKeyword(r, "agent-yes")).toBe(true); // spawn dir still matches

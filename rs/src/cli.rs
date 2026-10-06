@@ -43,7 +43,6 @@ pub const SUBCOMMANDS: &[&str] = &[
     "exit",
     "restart",
     "note",
-    "cwd",
     "todo",
     "ask",
     "answer",
