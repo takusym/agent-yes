@@ -104,9 +104,11 @@ function unquote(tok: string): string {
 
 /**
  * Directories a shell command steps into: `cd X`, `pushd X`, `git -C X` at a
- * command boundary. Relative targets resolve against `base` (the dir claude's
- * Bash tool starts every call in — the spawn cwd). `cd -` / `cd` alone / paths
- * with unexpanded `$VAR`s are skipped: we can't know where they land.
+ * command boundary. Relative targets resolve against the dir the command is in
+ * by then: `base` (the dir claude's Bash tool starts every call in — the spawn
+ * cwd), moved along by each earlier `cd`/`pushd` in the same command. `cd -` /
+ * `cd` alone / paths with unexpanded `$VAR`s are skipped (we can't know where
+ * they land), and after one of those, later relative targets are too.
  */
 export function commandDirs(command: string, base: string, home = homedir()): string[] {
   const out: string[] = [];
@@ -115,12 +117,15 @@ export function commandDirs(command: string, base: string, home = homedir()): st
     String.raw`(?:^|[;&|(\n]|&&|\|\|)\s*(?:(?:cd|pushd)\s+${tok}|git\s+-C\s+${tok})`,
     "g",
   );
+  let here: string | null = base;
   for (const m of command.matchAll(re)) {
+    const isCd = m[1] !== undefined;
     const raw = unquote(m[1] ?? m[2] ?? "");
-    if (!raw || raw === "-") continue;
-    const p = expandHome(raw, home);
-    if (p.includes("$")) continue;
-    out.push(path.resolve(base, p));
+    const p = raw && raw !== "-" ? expandHome(raw, home) : "";
+    const target: string | null =
+      !p || p.includes("$") ? null : path.isAbsolute(p) ? p : here && path.resolve(here, p);
+    if (target) out.push(path.resolve(target));
+    if (isCd) here = target;
   }
   return out;
 }
@@ -317,6 +322,50 @@ export interface WorkDirRecord extends AgentKey {
   cwd: string;
 }
 
+// Per-process caches, so serve's polling of listRecords doesn't redo the
+// process snapshot and transcript parse every tick:
+// - which claude pid runs under an agent (fixed for the agent's lifetime; its
+//   session file is re-read each time since /clear starts a new session);
+// - the observed root per transcript file, keyed by its size + mtime.
+const claudePidOf = new Map<string, number>();
+const observedOf = new Map<string, { size: number; mtimeMs: number; observed: TimedPath | null }>();
+
+async function readClaudeSession(pid: number): Promise<ClaudeSession | null> {
+  try {
+    const j = JSON.parse(
+      await readFile(path.join(claudeConfigDir(), "sessions", `${pid}.json`), "utf-8"),
+    );
+    if (j?.pid === pid && typeof j?.sessionId === "string")
+      return { pid, sessionId: j.sessionId, cwd: String(j.cwd ?? "") };
+  } catch {
+    /* gone */
+  }
+  return null;
+}
+
+async function observedFromTranscript(
+  file: string,
+  spawn: string,
+  gitRoot: GitRootFn,
+): Promise<TimedPath | null> {
+  const st = await stat(file);
+  const hit = observedOf.get(file);
+  if (hit && hit.size === st.size && hit.mtimeMs === st.mtimeMs) return hit.observed;
+  // Only the recent past votes (see pickObserved); bound the git calls.
+  const raw = transcriptSignals(await readTailLines(file), spawn).slice(-80);
+  // Signals repeat the same few dirs: one concurrent lookup per dir.
+  const dirs = [...new Set(raw.map((s) => s.path))];
+  const roots = new Map(await Promise.all(dirs.map(async (d) => [d, await gitRoot(d)] as const)));
+  const rooted: TimedPath[] = [];
+  for (const s of raw) {
+    const root = roots.get(s.path);
+    if (root) rooted.push({ path: root, at: s.at });
+  }
+  const observed = pickObserved(rooted);
+  observedOf.set(file, { size: st.size, mtimeMs: st.mtimeMs, observed });
+  return observed;
+}
+
 /**
  * Resolve the effective work dir for each record. `gitRoot` is injected so
  * callers can share their per-invocation git cache. Never throws: any failure
@@ -328,8 +377,21 @@ export async function resolveWorkDirs(
 ): Promise<Map<number, WorkDir>> {
   const out = new Map<number, WorkDir>();
   if (records.length === 0) return out;
-  const needTranscript = records.some((r) => r.cli === "claude");
-  const [sessions, procs] = needTranscript
+  const keyOf = (r: AgentKey) => `${r.pid}:${r.started_at}`;
+  // Only snapshot the process table when some claude agent's session pid isn't
+  // known yet (or its session file has gone, i.e. claude restarted).
+  const known = new Map<string, ClaudeSession>();
+  await Promise.all(
+    records
+      .filter((r) => r.cli === "claude" && claudePidOf.has(keyOf(r)))
+      .map(async (r) => {
+        const s = await readClaudeSession(claudePidOf.get(keyOf(r))!);
+        if (s) known.set(keyOf(r), s);
+        else claudePidOf.delete(keyOf(r));
+      }),
+  );
+  const needScan = records.some((r) => r.cli === "claude" && !known.has(keyOf(r)));
+  const [sessions, procs] = needScan
     ? await Promise.all([
         readClaudeSessions(),
         snapshotProcs().catch(() => new Map<number, ProcSample>()),
@@ -350,24 +412,14 @@ export async function resolveWorkDirs(
             ? selfRaw
             : null;
         let observed: TimedPath | null = null;
-        if (r.cli === "claude" && sessions.size > 0) {
-          const session = [...descendantsOf(r.pid, kids)].map((p) => sessions.get(p)).find(Boolean);
-          const file = session ? await findTranscript(session) : null;
-          if (file) {
-            // Only the recent past votes (see pickObserved); bound the git calls.
-            const raw = transcriptSignals(await readTailLines(file), r.cwd).slice(-80);
-            // Signals repeat the same few dirs: one concurrent lookup per dir.
-            const dirs = [...new Set(raw.map((s) => s.path))];
-            const roots = new Map(
-              await Promise.all(dirs.map(async (d) => [d, await gitRoot(d)] as const)),
-            );
-            const rooted: TimedPath[] = [];
-            for (const s of raw) {
-              const root = roots.get(s.path);
-              if (root) rooted.push({ path: root, at: s.at });
-            }
-            observed = pickObserved(rooted);
+        if (r.cli === "claude") {
+          let session = known.get(keyOf(r));
+          if (!session && sessions.size > 0) {
+            session = [...descendantsOf(r.pid, kids)].map((p) => sessions.get(p)).find(Boolean);
+            if (session) claudePidOf.set(keyOf(r), session.pid);
           }
+          const file = session ? await findTranscript(session) : null;
+          if (file) observed = await observedFromTranscript(file, r.cwd, gitRoot);
         }
         out.set(r.pid, resolveWorkDir({ spawn: r.cwd, self, observed }));
       } catch {

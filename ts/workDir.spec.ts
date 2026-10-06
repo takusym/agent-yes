@@ -33,6 +33,20 @@ describe("commandDirs", () => {
     expect(commandDirs("cd ../feat-y && ls", SPAWN, HOME)).toEqual(["/repo/alpha/tree/feat-y"]);
   });
 
+  it("chains relative cds through one command", () => {
+    expect(commandDirs("cd sub && cd ../other && git status", "/repo/a", HOME)).toEqual([
+      "/repo/a/sub",
+      "/repo/a/other",
+    ]);
+    // after a cd we can't place, later relative targets are unknown too
+    expect(commandDirs("cd $WT && cd lib && ls", "/repo/a", HOME)).toEqual([]);
+    // git -C doesn't move the shell
+    expect(commandDirs("git -C sub status && cd x", "/repo/a", HOME)).toEqual([
+      "/repo/a/sub",
+      "/repo/a/x",
+    ]);
+  });
+
   it("handles quoting and finds a cd after a separator", () => {
     expect(commandDirs("echo hi && cd '/repo/with space' && ls", SPAWN, HOME)).toEqual([
       "/repo/with space",
