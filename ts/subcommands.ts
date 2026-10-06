@@ -1453,15 +1453,16 @@ export async function listRecords(
 }
 
 // git toplevel per dir, shared across one process's listRecords calls (serve
-// polls listRecords; a repo's root doesn't move under a running agent).
-const workDirRootCache = new Map<string, Promise<string | null>>();
-function gitRootCached(dir: string): Promise<string | null> {
-  let p = workDirRootCache.get(dir);
-  if (!p) {
-    p = runGitCli(["rev-parse", "--show-toplevel"], dir).then((o) => o?.trim() || null);
-    workDirRootCache.set(dir, p);
-  }
-  return p;
+// polls listRecords). Entries expire so a long-lived serve notices a dir that
+// became a repo (or a worktree that was removed) after it was first looked up.
+const WORKDIR_ROOT_TTL_MS = 60_000;
+const workDirRootCache = new Map<string, { at: number; root: Promise<string | null> }>();
+function gitRootCached(dir: string, now = Date.now()): Promise<string | null> {
+  const hit = workDirRootCache.get(dir);
+  if (hit && now - hit.at < WORKDIR_ROOT_TTL_MS) return hit.root;
+  const root = runGitCli(["rev-parse", "--show-toplevel"], dir).then((o) => o?.trim() || null);
+  workDirRootCache.set(dir, { at: now, root });
+  return root;
 }
 
 /**

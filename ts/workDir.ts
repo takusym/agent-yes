@@ -340,9 +340,14 @@ export async function resolveWorkDirs(
           if (file) {
             // Only the recent past votes (see pickObserved); bound the git calls.
             const raw = transcriptSignals(await readTailLines(file), r.cwd).slice(-80);
+            // Signals repeat the same few dirs: one concurrent lookup per dir.
+            const dirs = [...new Set(raw.map((s) => s.path))];
+            const roots = new Map(
+              await Promise.all(dirs.map(async (d) => [d, await gitRoot(d)] as const)),
+            );
             const rooted: TimedPath[] = [];
             for (const s of raw) {
-              const root = await gitRoot(s.path);
+              const root = roots.get(s.path);
               if (root) rooted.push({ path: root, at: s.at });
             }
             observed = pickObserved(rooted);
