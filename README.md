@@ -224,6 +224,24 @@ ay lanes resume alpha --max-age 24h
 picking the newest `~/.claude/projects/<cwd>/*.jsonl` (for a shared cwd, the session that
 mentions `[<name>]` most). Sessions older than `--max-age` (default 48h) are skipped.
 
+### Recurring reminders (`ay cron`)
+
+Send a message to an agent on a 5-field cron (timezone `$AY_CRON_TZ`, default Asia/Tokyo):
+
+```bash
+ay cron "*/30 9-18 * * 1-5" lane:alpha "progress report please ({now})"
+ay cron ls                        # id, cron, target, next run, last result
+ay cron rm c1
+ay schedules ls                   # everything: cron reminders + legacy `ay schedule` jobs
+ay schedules daemon status        # the per-machine scheduler daemon
+```
+
+Reminders live in one store (`~/.config/agent-yes/schedules.json`). One scheduler
+daemon per machine fires them with `ay send --force`; it is kept alive by oxmgr when
+installed, else systemd --user, launchd, Windows Task Scheduler, or a detached process.
+A tick missed while the daemon was down is skipped. Fires are logged as JSONL to
+`~/.local/share/agent-yes/schedules.log`; a target that isn't live is logged and skipped.
+
 ### Shared task list across agents (`ay todo`)
 
 A lifecycle-tracked task list that every agent working on a repo reads and

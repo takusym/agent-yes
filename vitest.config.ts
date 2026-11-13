@@ -72,6 +72,9 @@ export default defineConfig({
         // `ay lanes` CLI shell — runs `ay ls`, ssh and `ay --detach`; its logic
         // (parsing, resolution, session selection) lives in lanes.ts (covered).
         "ts/lanesCli.ts",
+        // `ay cron` / `ay schedules` shell — store files, ay ls/send, daemon loop and
+        // OS autostart; the logic lives in schedules.ts (covered).
+        "ts/schedulesCli.ts",
         // HTTP server and remote config — integration-test only (requires a
         // running server and network); unit coverage not meaningful here.
         "ts/serve.ts",
