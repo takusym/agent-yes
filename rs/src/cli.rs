@@ -56,6 +56,9 @@ pub const SUBCOMMANDS: &[&str] = &[
     "serve",
     "tray",
     "schedule",
+    "schedules",
+    "sched",
+    "cron",
     "remote",
     "expose",
     "callback",
@@ -73,8 +76,16 @@ pub const SUBCOMMANDS: &[&str] = &[
 /// on the manager entry). Mirrors `MANAGER_SUBCOMMANDS` in ts/subcommands.ts.
 pub const MANAGER_SUBCOMMANDS: &[&str] = &[
     // manage this host
-    "setup", "ws", "lanes", // prompt-word verbs
-    "read", "share", "connect", "kill",
+    "setup",
+    "ws",
+    "lanes",
+    "schedules",
+    "sched",
+    "cron", // prompt-word verbs
+    "read",
+    "share",
+    "connect",
+    "kill",
 ];
 
 /// Whether `name` is a management subcommand. `manager_commands` (true for the
