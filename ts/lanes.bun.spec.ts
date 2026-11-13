@@ -14,6 +14,7 @@ import {
   planResume,
   promptTag,
   resolveLane,
+  resumeNote,
   type LiveAgent,
 } from "./lanes.ts";
 
@@ -161,5 +162,37 @@ describe("resume session selection", () => {
       ["gamma", "skip", "s-gamma"],
     ]);
     expect(plans[2]!.reason).toMatch(/max-age/);
+  });
+});
+
+describe("edge cases", () => {
+  let home: string;
+  beforeEach(() => {
+    home = mkdtempSync(path.join(tmpdir(), "ay-lanes-"));
+  });
+  afterEach(() => rmSync(home, { recursive: true, force: true }));
+
+  it("tolerates sparse records and missing prompts", () => {
+    const live = parseLive([null, { pid: 5 }]);
+    expect(live).toEqual([{ started_at: 0, pid: 5, agent_id: "", cwd: "", tag: null }]);
+    expect(promptTag(undefined)).toBe(null);
+    expect(pickForLs(lanes[0]!, [], HOME)).toBe(null);
+  });
+  it("empty project dir has no session", () => {
+    mkdirSync(path.join(home, "p"));
+    expect(pickSession(path.join(home, "p"), "alpha", true)).toBe(null);
+  });
+  it("plans skip ambiguous lanes and lanes without a session", () => {
+    const reg = parseLanes("alpha\tw/a\nbeta\tw/b\n");
+    const live = [
+      agent({ pid: 1, cwd: path.join(home, "w/a") }),
+      agent({ pid: 2, cwd: path.join(home, "w/a") }),
+    ];
+    const plans = planResume(reg, reg, live, home, 3600e3, Date.now());
+    expect(plans[0]!.reason).toMatch(/refusing/);
+    expect(plans[1]!.reason).toMatch(/no Claude session/);
+  });
+  it("the resume note names the lane", () => {
+    expect(resumeNote("alpha")).toContain("[alpha]");
   });
 });

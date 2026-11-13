@@ -1183,7 +1183,7 @@ export async function runSubcommand(argv: string[]): Promise<number | null> {
         return cmdWs(rest);
       }
       case "lanes": {
-        const { cmdLanes } = await import("./lanes.ts");
+        const { cmdLanes } = await import("./lanesCli.ts");
         return cmdLanes(rest);
       }
       case "schedule": {
